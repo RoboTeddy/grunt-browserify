@@ -19,7 +19,7 @@ var async = require('async');
 module.exports = function (grunt) {
   grunt.registerMultiTask('browserify', 'Grunt task for browserify.', function () {
     var shims;
-    var done = this.async();
+    var done = _.once(this.async());
     var aliases = [];
     var task = this;
     var taskOpts = this.options();
@@ -33,43 +33,47 @@ module.exports = function (grunt) {
       done = keepAliveFn;
     }
 
-    async.forEachSeries(this.files, function (file, next) {
-      var opts = configureOptions(task.options(), browserifyConstructorOpts);
-      browserifyConstructorOpts.entries = grunt.file.expand({filter: 'isFile'}, file.src).map(function (f) {
-        return path.resolve(f);
-      });
-
-      var b = opts.watch? watchify(browserifyConstructorOpts) : browserify(browserifyConstructorOpts);
-      b.on('error', function (err) {
-        grunt.fail.warn(err);
-      });
-
-      configureIgnore(opts, b);
-      configureAliases(opts, aliases, b);
-      configureAliasMappings(opts, aliases, b);
-      configureShims(opts, shims, b, browserifyConstructorOpts);
-      configureExternal(opts, b);
-
-      opts.transform.forEach(function (transform) {
-        b.transform(transform);
-      });
-
-      var destPath = createDestDir(file.dest);
-      var bundleComplete = onBundleComplete(file.dest, next);
-
-      doBundle(b, opts, bundleComplete);
-
-      if (opts.watch) {
-        var bundleUpdate = onBundleComplete(file.dest, keepAliveFn);
-        b.on('update', function (ids) {
-          ids.forEach(function (id) {
-            grunt.log.ok(id + ' changed, updating browserify bundle.');
-          });
-          doBundle(b, opts, bundleUpdate);
+    var attempt = _.throttle(function() {
+      async.forEachSeries(task.files, function (file, next) {
+        var opts = configureOptions(task.options(), browserifyConstructorOpts);
+        browserifyConstructorOpts.entries = grunt.file.expand({filter: 'isFile'}, file.src).map(function (f) {
+          return path.resolve(f);
         });
-      }
 
-    }, done);
+        var b = opts.watch? watchify(browserifyConstructorOpts) : browserify(browserifyConstructorOpts);
+        b.on('error', function (err) {
+          grunt.fail.warn(err);
+        });
+
+        configureIgnore(opts, b);
+        configureAliases(opts, aliases, b);
+        configureAliasMappings(opts, aliases, b);
+        configureShims(opts, shims, b, browserifyConstructorOpts);
+        configureExternal(opts, b);
+
+        opts.transform.forEach(function (transform) {
+          b.transform(transform);
+        });
+
+        var destPath = createDestDir(file.dest);
+        var bundleComplete = onBundleComplete(file.dest, next, opts.watch ? attempt : null);
+
+        doBundle(b, opts, bundleComplete);
+
+        if (opts.watch) {
+          var bundleUpdate = onBundleComplete(file.dest, keepAliveFn, attempt);
+          b.on('update', function (ids) {
+            ids.forEach(function (id) {
+              grunt.log.ok(id + ' changed, updating browserify bundle.');
+            });
+            doBundle(b, opts, bundleUpdate);
+          });
+        }
+
+      }, done);
+    }, 600);
+
+    attempt();
   });
 
   /**
@@ -270,16 +274,27 @@ module.exports = function (grunt) {
   /**
   * Wire the callback to call on bundle completion
   */
-  var onBundleComplete = function (destination, next) {
+  var prevErr;
+  var onBundleComplete = function (destination, next, retry) {
     return function (err, src) {
       if (err) {
-        grunt.log.error(err);
-        grunt.fail.warn('Error running grunt-browserify.');
+        if (!retry) {
+          grunt.log.error(err);
+          grunt.fail.warn('Error running grunt-browserify.');
+        }
+        else {
+          if (String(err) !== String(prevErr)) {
+            grunt.log.warn(err);
+          }
+          prevErr = err;
+          retry();
+        }
       }
-
-      grunt.file.write(destination, src);
-      grunt.log.ok('Bundled ' + destination);
-      next();
+      else {
+        grunt.file.write(destination, src);
+        grunt.log.ok('Bundled ' + destination);
+        next();
+      }
     };
   };
 
